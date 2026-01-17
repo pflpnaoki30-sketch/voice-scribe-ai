@@ -1,0 +1,272 @@
+/* ===== Base Styles ===== */
+* {
+    -webkit-tap-highlight-color: transparent;
+    -webkit-touch-callout: none;
+}
+
+html {
+    scroll-behavior: smooth;
+}
+
+body {
+    overscroll-behavior-y: contain;
+}
+
+/* ===== Safe Area Padding ===== */
+.safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 20px);
+}
+
+/* ===== Custom Scrollbar ===== */
+::-webkit-scrollbar {
+    width: 4px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background: #cbd5e1;
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #94a3b8;
+}
+
+/* ===== Recording Pulse Animations ===== */
+@keyframes ping-slow {
+    0% {
+        transform: scale(1);
+        opacity: 0.5;
+    }
+
+    100% {
+        transform: scale(1.8);
+        opacity: 0;
+    }
+}
+
+@keyframes ping-slower {
+    0% {
+        transform: scale(1);
+        opacity: 0.4;
+    }
+
+    100% {
+        transform: scale(2.2);
+        opacity: 0;
+    }
+}
+
+@keyframes ping-slowest {
+    0% {
+        transform: scale(1);
+        opacity: 0.3;
+    }
+
+    100% {
+        transform: scale(2.6);
+        opacity: 0;
+    }
+}
+
+.animate-ping-slow {
+    animation: ping-slow 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+.animate-ping-slower {
+    animation: ping-slower 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+    animation-delay: 0.3s;
+}
+
+.animate-ping-slowest {
+    animation: ping-slowest 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+    animation-delay: 0.6s;
+}
+
+/* ===== Recording State Styles ===== */
+.recording .record-btn-bg {
+    background: linear-gradient(to bottom right, #ef4444, #dc2626);
+}
+
+#recordBtn.recording {
+    background: linear-gradient(to bottom right, #ef4444, #dc2626) !important;
+    box-shadow: 0 25px 50px -12px rgba(239, 68, 68, 0.4) !important;
+}
+
+#recordBtn.recording:hover {
+    background: linear-gradient(to bottom right, #dc2626, #b91c1c) !important;
+}
+
+/* ===== Status Dot States ===== */
+#statusDot.listening {
+    background-color: #ef4444;
+    box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.5);
+    animation: pulse-dot 1s ease-in-out infinite;
+}
+
+@keyframes pulse-dot {
+
+    0%,
+    100% {
+        transform: scale(1);
+        opacity: 1;
+    }
+
+    50% {
+        transform: scale(1.3);
+        opacity: 0.8;
+    }
+}
+
+#statusDot.processing {
+    animation: pulse-dot 0.8s ease-in-out infinite;
+}
+
+/* ===== Bottom Sheet Animation ===== */
+#bottomSheet.open {
+    transform: translateY(0);
+}
+
+#bottomSheetOverlay.open {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* ===== Toast Animation ===== */
+#toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+    pointer-events: auto;
+}
+
+/* ===== Keyword Card Styles ===== */
+.keyword-card {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 1rem 1.25rem;
+    background: linear-gradient(to right, #f8fafc, #f1f5f9);
+    border-radius: 1rem;
+    border: 1px solid #e2e8f0;
+    transition: all 0.2s ease;
+}
+
+.keyword-card:hover {
+    background: linear-gradient(to right, #f1f5f9, #e2e8f0);
+    border-color: #cbd5e1;
+}
+
+.keyword-card:active {
+    transform: scale(0.98);
+}
+
+.keyword-text {
+    font-weight: 500;
+    color: #334155;
+    font-size: 0.9375rem;
+}
+
+.keyword-delete-btn {
+    padding: 0.5rem;
+    border-radius: 0.75rem;
+    background: #fee2e2;
+    color: #ef4444;
+    transition: all 0.2s ease;
+}
+
+.keyword-delete-btn:hover {
+    background: #fecaca;
+}
+
+.keyword-delete-btn:active {
+    transform: scale(0.9);
+}
+
+/* ===== History Card Styles ===== */
+.history-card {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 1rem 1.25rem;
+    background: rgba(255, 255, 255, 0.8);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: 1rem;
+    border: 1px solid rgba(255, 255, 255, 0.5);
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.03);
+    transition: all 0.2s ease;
+}
+
+.history-card:hover {
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.08), 0 4px 6px -2px rgba(0, 0, 0, 0.04);
+}
+
+.history-card:active {
+    transform: scale(0.98);
+}
+
+/* ===== Loading Shimmer Effect ===== */
+@keyframes shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.shimmer {
+    background: linear-gradient(90deg,
+            #f1f5f9 25%,
+            #e2e8f0 50%,
+            #f1f5f9 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+}
+
+/* ===== Fade In Animation ===== */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.fade-in {
+    animation: fadeIn 0.3s ease-out forwards;
+}
+
+/* ===== Hover Effects for Touch Devices ===== */
+@media (hover: none) {
+    button:hover {
+        background-color: inherit;
+    }
+}
+
+/* ===== Print Styles ===== */
+@media print {
+
+    header,
+    .fixed {
+        display: none !important;
+    }
+
+    main {
+        padding: 0 !important;
+    }
+
+    #transcriptText {
+        font-size: 12pt;
+        line-height: 1.6;
+    }
+}
