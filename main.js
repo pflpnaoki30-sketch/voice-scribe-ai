@@ -144,17 +144,17 @@ function handleTranscriptionResult(text) {
     state.isProcessing = false;
 
     if (text && text.trim()) {
-        // 強力なサニタイズ処理
-        let sanitized = sanitizeText(text.trim());
+        // 鉄壁のフィルタリング
+        let cleaned = cleanText(text.trim());
 
-        // サニタイズ後にテキストが残っているか確認
-        if (!sanitized || sanitized.length <= 2) {
+        // クリーン後にテキストが残っているか確認
+        if (!cleaned) {
             showToast('有効な音声を認識できませんでした', 'warning');
             updateStatus('ready', 'タップして録音開始');
             return;
         }
 
-        const processedText = processKeywords(sanitized);
+        const processedText = processKeywords(cleaned);
         const newTranscription = createTranscription(processedText);
         state.transcriptions.unshift(newTranscription);
         saveTranscriptions();
@@ -169,74 +169,147 @@ function handleTranscriptionResult(text) {
 }
 
 /**
- * テキストサニタイズ - ハルシネーション除去
- * 数字の羅列、繰り返しフレーズ、定型句を除去
+ * cleanText - 鉄壁のテキストフィルタリング
+ * ハルシネーション、ループ、ノイズを完全除去
  */
-function sanitizeText(text) {
+function cleanText(text) {
     if (!text) return '';
 
     let cleaned = text;
 
-    // === 1. 数字/記号の羅列削除 ===
-    cleaned = cleaned.replace(/[\d]{4,}/g, '');              // 連続する数字4桁以上
-    cleaned = cleaned.replace(/[\d\.]{5,}/g, '');            // 8.8.8.8... パターン
-    cleaned = cleaned.replace(/[\.]{3,}/g, '');              // ......
-    cleaned = cleaned.replace(/[。]{2,}/g, '。');            // 。。。→。
-    cleaned = cleaned.replace(/[、]{2,}/g, '、');            // 、、、→、
-    cleaned = cleaned.replace(/[…]{2,}/g, '…');              // ………→…
-    cleaned = cleaned.replace(/[\s]{3,}/g, ' ');             // 連続空白
+    // ========================================
+    // 1. ループ検出（同じフレーズが3回以上連続→全体破棄）
+    // ========================================
+    if (hasRepetitionLoop(cleaned)) {
+        return '';
+    }
 
-    // === 2. 繰り返し削除（動的検出）===
-    // 2文字以上のパターンが3回以上連続する場合
-    cleaned = cleaned.replace(/(.{2,20})\1{2,}/g, '$1');
+    // ========================================
+    // 2. 記号/数字の羅列削除
+    // ========================================
+    cleaned = cleaned.replace(/[\d\.]{4,}/g, '');            // 8.8.8., 1234 等
+    cleaned = cleaned.replace(/[\.]{2,}/g, '');              // ....
+    cleaned = cleaned.replace(/[。]{2,}/g, '。');            // 。。→。
+    cleaned = cleaned.replace(/[、]{2,}/g, '、');            // 、、→、
+    cleaned = cleaned.replace(/[…]{2,}/g, '…');              // ……→…
+    cleaned = cleaned.replace(/[\s]{2,}/g, ' ');             // 連続空白→単一
 
-    // 単語レベルの繰り返し
-    cleaned = cleaned.replace(/(\S+)\s+\1(\s+\1)+/g, '$1');
-
-    // === 3. ブラックリスト（単独出現時のみ削除）===
-    const blacklistPatterns = [
-        /^[\s]*ありがとうございま(す|した)[。\.]*[\s]*$/i,
-        /^[\s]*(ご)?視聴ありがとうございました[。\.]*[\s]*$/i,
-        /^[\s]*チャンネル登録[^。]*[。\.]*[\s]*$/i,
-        /^[\s]*高評価[^。]*[。\.]*[\s]*$/i,
-        /^[\s]*いいね[^。]*[。\.]*[\s]*$/i,
-        /^[\s]*お疲れ様でした[。\.]*[\s]*$/i,
-        /^[\s]*それでは[。\.]*[\s]*$/i,
-        /^[\s]*では[、。\.]*[\s]*$/i,
-        /^[\s]*はい[、。\.]*[\s]*$/i,
-        /^[\s]*えー[っと]*[、。\.]*[\s]*$/i,
-        /^[\s]*あの[ー]*[、。\.]*[\s]*$/i,
-        /^[\s]*\([笑泣汗]*\)[\s]*$/i,                         // (笑)(泣)のみ
-        /^[\s]*[笑泣汗]+[\s]*$/i,                             // 笑 のみ
-        /^[\s]*[\(\)（）\[\]【】]+[\s]*$/i,                    // 括弧のみ
-        /^[\s]*[。、\.\.\.…]+[\s]*$/i,                        // 句読点のみ
+    // ========================================
+    // 3. ブラックリスト（Whisper特有の幻覚ワード）
+    // ========================================
+    const blacklistWords = [
+        'ご視聴ありがとうございました',
+        '視聴ありがとうございました',
+        'ありがとうございました',
+        'チャンネル登録',
+        '高評価',
+        'いいね',
+        '字幕',
+        'サブタイトル',
+        '翻訳',
+        'Translated by',
+        'Subtitles by',
+        'Transcribed by',
+        'Amara.org',
     ];
 
-    for (const pattern of blacklistPatterns) {
-        if (pattern.test(cleaned)) {
+    for (const word of blacklistWords) {
+        if (cleaned.includes(word)) {
+            // ブラックリストワードを含む文を削除
+            const sentences = cleaned.split(/[。\.!\?！？]/);
+            cleaned = sentences
+                .filter(s => !s.includes(word))
+                .join('。')
+                .replace(/^。+|。+$/g, '');
+        }
+    }
+
+    // ブラックリストワードだけで構成されている場合は破棄
+    const blacklistOnlyPattern = new RegExp(
+        `^[\\s]*(?:${blacklistWords.map(escapeRegExp).join('|')})[。、\\.\\s]*$`,
+        'i'
+    );
+    if (blacklistOnlyPattern.test(cleaned)) {
+        return '';
+    }
+
+    // ========================================
+    // 4. 繰り返しフレーズの削除（軽度）
+    // ========================================
+    // 2文字以上が3回以上連続→1回に
+    cleaned = cleaned.replace(/(.{2,15})\1{2,}/g, '$1');
+    // 単語の繰り返し（スペース区切り）
+    cleaned = cleaned.replace(/(\S+)[\s、]+\1([\s、]+\1)+/g, '$1');
+
+    // ========================================
+    // 5. 短すぎるノイズ（2文字以下のひらがな/カタカナ単体）
+    // ========================================
+    const noisePatterns = [
+        /^[あ-んア-ン]{1,2}$/,               // ひらがな/カタカナ1-2文字
+        /^[えあうお][ーっ]*$/,               // えー、あー、うー 等
+        /^は[いぃ]*$/,                       // はい
+        /^う[ん]*$/,                         // うん
+        /^そう$/,                            // そう
+        /^ね[ぇ]*$/,                         // ねー
+        /^[笑泣汗]+$/,                       // 笑、泣 等
+        /^\([^)]*\)$/,                       // (笑) 等
+        /^[\s。、\.…]+$/,                    // 句読点のみ
+    ];
+
+    for (const pattern of noisePatterns) {
+        if (pattern.test(cleaned.trim())) {
             return '';
         }
     }
 
-    // === 4. 文中のハルシネーションフレーズを削除 ===
-    const inlinePatterns = [
-        /ご視聴ありがとうございました[。\.]*$/g,
-        /チャンネル登録[お願いよろしく]+[します]*[。\.]*$/g,
-        /高評価[お願いよろしく]+[します]*[。\.]*$/g,
-    ];
+    // ========================================
+    // 6. 最終クリーンアップ
+    // ========================================
+    cleaned = cleaned.trim();
+    cleaned = cleaned.replace(/^[、。\.…\s]+/, '');          // 先頭の句読点削除
+    cleaned = cleaned.replace(/[、\s]+$/, '');               // 末尾の不要文字削除
 
-    for (const pattern of inlinePatterns) {
-        cleaned = cleaned.replace(pattern, '');
+    // 3文字未満は破棄
+    if (cleaned.length < 3) {
+        return '';
     }
 
-    // === 5. 最終クリーンアップ ===
-    cleaned = cleaned.trim();
-
-    // 先頭・末尾の不要な句読点を削除
-    cleaned = cleaned.replace(/^[、。\.\s]+/, '');
-    cleaned = cleaned.replace(/[、\s]+$/, '');
-
     return cleaned;
+}
+
+/**
+ * ループ検出
+ * 同じフレーズが3回以上連続していたらtrue
+ */
+function hasRepetitionLoop(text) {
+    if (!text || text.length < 6) return false;
+
+    // 3文字〜20文字のフレーズが3回以上連続するパターン
+    const loopPattern = /(.{3,20})\1{2,}/;
+    if (loopPattern.test(text)) {
+        // マッチした繰り返し部分が全体の50%以上を占めるなら破棄
+        const match = text.match(loopPattern);
+        if (match && match[0].length > text.length * 0.5) {
+            return true;
+        }
+    }
+
+    // 単語レベルのループ検出（「じゃあ、じゃあ、じゃあ」等）
+    const words = text.split(/[、。\s]+/).filter(w => w.length > 0);
+    if (words.length >= 3) {
+        const wordCounts = {};
+        for (const word of words) {
+            wordCounts[word] = (wordCounts[word] || 0) + 1;
+        }
+        // 同じ単語が全体の70%以上を占める
+        for (const count of Object.values(wordCounts)) {
+            if (count >= 3 && count / words.length >= 0.7) {
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 function updateStatus(status, message) {

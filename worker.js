@@ -1,8 +1,9 @@
 /**
  * VoiceScribe AI - Web Worker
- * Transformers.js (Whisper-tiny) を使用したローカル音声認識
+ * Transformers.js (Whisper-base) を使用したローカル音声認識
  * 
- * ハルシネーション抑制パラメータ適用版
+ * whisper-base: whisper-tinyより高精度な日本語認識
+ * ハルシネーション抑制パラメータ適用
  */
 
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
@@ -13,6 +14,9 @@ env.useBrowserCache = true;
 let transcriber = null;
 let isModelLoading = false;
 let isModelReady = false;
+
+// モデル設定
+const MODEL_ID = 'Xenova/whisper-base';
 
 async function initializeModel() {
     if (isModelLoading || isModelReady) return;
@@ -28,7 +32,7 @@ async function initializeModel() {
 
         transcriber = await pipeline(
             'automatic-speech-recognition',
-            'Xenova/whisper-tiny',
+            MODEL_ID,
             {
                 quantized: true,
                 progress_callback: (progress) => {
@@ -91,46 +95,32 @@ async function transcribe(audioData, keywordPrompt = '') {
             message: '認識中...'
         });
 
-        // ハルシネーション抑制のための最適化パラメータ
+        // 厳格なハルシネーション抑制設定
         const options = {
-            // 言語設定
+            // 言語設定（日本語固定）
             language: 'ja',
             task: 'transcribe',
 
-            // チャンク処理設定
+            // チャンク処理
             chunk_length_s: 30,
             stride_length_s: 5,
             return_timestamps: false,
 
-            // ハルシネーション抑制パラメータ
-            // temperature 0.2: 少しのランダム性でループ回避
-            temperature: 0.2,
-            do_sample: false,
+            // === 厳格設定 ===
+            temperature: 0,                    // 完全に確定的な出力
+            do_sample: false,                  // サンプリング無効（greedy decoding）
+            repetition_penalty: 1.2,           // 繰り返しペナルティ
+            no_speech_threshold: 0.6,          // 無音閾値
 
-            // 繰り返し抑制
-            repetition_penalty: 1.5,           // より強いペナルティ
-            no_repeat_ngram_size: 3,           // 3-gramの繰り返しを禁止
-
-            // 無音/ノイズ閾値
-            no_speech_threshold: 0.6,
+            // 追加の安定化
             compression_ratio_threshold: 2.4,
             logprob_threshold: -1.0,
-
-            // 出力制限
-            max_new_tokens: 256,               // 短めに制限
+            max_new_tokens: 448,
         };
 
         const result = await transcriber(audioData, options);
 
         let transcribedText = result.text || '';
-
-        // Worker側でも基本的なサニタイズを実行
-        transcribedText = sanitizeWorkerOutput(transcribedText);
-
-        // キーワード補正
-        if (keywordPrompt && keywordPrompt.trim()) {
-            transcribedText = applyKeywordCorrections(transcribedText, keywordPrompt);
-        }
 
         self.postMessage({
             type: 'result',
@@ -158,56 +148,6 @@ async function transcribe(audioData, keywordPrompt = '') {
             message: '準備完了'
         });
     }
-}
-
-/**
- * Worker側での基本サニタイズ
- */
-function sanitizeWorkerOutput(text) {
-    if (!text) return '';
-
-    let cleaned = text;
-
-    // 数字・記号の連続パターンを削除
-    cleaned = cleaned.replace(/[\d\.]{5,}/g, '');           // 8.8.8.8... 等
-    cleaned = cleaned.replace(/\.{3,}/g, '');               // ......
-    cleaned = cleaned.replace(/。{2,}/g, '。');             // 。。。→。
-    cleaned = cleaned.replace(/、{2,}/g, '、');             // 、、、→、
-
-    // 明らかなハルシネーションパターン
-    const hallucinationPatterns = [
-        /^(ご視聴)?ありがとうございました[。\.]*$/i,
-        /^チャンネル登録.*$/i,
-        /^高評価.*$/i,
-        /^\(.*\)$/,                                          // (笑)のみ等
-    ];
-
-    for (const pattern of hallucinationPatterns) {
-        if (pattern.test(cleaned.trim())) {
-            return '';
-        }
-    }
-
-    return cleaned.trim();
-}
-
-/**
- * キーワード補正を適用
- */
-function applyKeywordCorrections(text, keywordPrompt) {
-    const keywords = keywordPrompt.split(',').map(k => k.trim()).filter(k => k);
-    let correctedText = text;
-
-    keywords.forEach(keyword => {
-        const regex = new RegExp(escapeRegExp(keyword), 'gi');
-        correctedText = correctedText.replace(regex, keyword);
-    });
-
-    return correctedText;
-}
-
-function escapeRegExp(string) {
-    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 self.onmessage = async (event) => {
