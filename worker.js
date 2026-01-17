@@ -2,7 +2,7 @@
  * VoiceScribe AI - Web Worker
  * Transformers.js (Whisper-tiny) を使用したローカル音声認識
  * 
- * ハルシネーション抑制パラメータを適用
+ * ハルシネーション抑制パラメータ適用版
  */
 
 import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
@@ -103,25 +103,29 @@ async function transcribe(audioData, keywordPrompt = '') {
             return_timestamps: false,
 
             // ハルシネーション抑制パラメータ
-            temperature: 0,                    // ランダム性を排除
-            do_sample: false,                  // サンプリング無効化（greedy decoding）
-            repetition_penalty: 1.2,           // 繰り返しペナルティ
-            no_speech_threshold: 0.6,          // 無音/ノイズ区間の閾値
+            // temperature 0.2: 少しのランダム性でループ回避
+            temperature: 0.2,
+            do_sample: false,
 
-            // 追加の安定化パラメータ
-            compression_ratio_threshold: 2.4,  // 圧縮率閾値（繰り返し検出）
-            logprob_threshold: -1.0,           // 低確率トークン除外
+            // 繰り返し抑制
+            repetition_penalty: 1.5,           // より強いペナルティ
+            no_repeat_ngram_size: 3,           // 3-gramの繰り返しを禁止
+
+            // 無音/ノイズ閾値
+            no_speech_threshold: 0.6,
+            compression_ratio_threshold: 2.4,
+            logprob_threshold: -1.0,
 
             // 出力制限
-            max_new_tokens: 448,               // 最大トークン数制限
+            max_new_tokens: 256,               // 短めに制限
         };
 
         const result = await transcriber(audioData, options);
 
         let transcribedText = result.text || '';
 
-        // 後処理: ハルシネーションパターンの除去
-        transcribedText = removeHallucinationPatterns(transcribedText);
+        // Worker側でも基本的なサニタイズを実行
+        transcribedText = sanitizeWorkerOutput(transcribedText);
 
         // キーワード補正
         if (keywordPrompt && keywordPrompt.trim()) {
@@ -157,46 +161,34 @@ async function transcribe(audioData, keywordPrompt = '') {
 }
 
 /**
- * ハルシネーションパターンを除去
- * 無音時に生成されがちな繰り返しフレーズを検出・削除
+ * Worker側での基本サニタイズ
  */
-function removeHallucinationPatterns(text) {
+function sanitizeWorkerOutput(text) {
     if (!text) return '';
-
-    // よくあるハルシネーションパターン
-    const hallucinationPatterns = [
-        /^[\s\S]*?(ご視聴ありがとうございました[。\.]*)+[\s\S]*$/gi,
-        /^[\s\S]*?(チャンネル登録[お願いします]*[。\.]*)+[\s\S]*$/gi,
-        /(それで[は]?[、。\.]*){3,}/gi,
-        /(何で言って[、。\.]*){2,}/gi,
-        /(ありがとうございました[。\.]*){3,}/gi,
-        /(お疲れ様でした[。\.]*){3,}/gi,
-        /^[\s。、\.…]+$/,  // 句読点のみ
-    ];
 
     let cleaned = text;
 
-    hallucinationPatterns.forEach(pattern => {
-        cleaned = cleaned.replace(pattern, '');
-    });
+    // 数字・記号の連続パターンを削除
+    cleaned = cleaned.replace(/[\d\.]{5,}/g, '');           // 8.8.8.8... 等
+    cleaned = cleaned.replace(/\.{3,}/g, '');               // ......
+    cleaned = cleaned.replace(/。{2,}/g, '。');             // 。。。→。
+    cleaned = cleaned.replace(/、{2,}/g, '、');             // 、、、→、
 
-    // 同じフレーズの連続繰り返しを検出（動的検出）
-    cleaned = removeDynamicRepetitions(cleaned);
+    // 明らかなハルシネーションパターン
+    const hallucinationPatterns = [
+        /^(ご視聴)?ありがとうございました[。\.]*$/i,
+        /^チャンネル登録.*$/i,
+        /^高評価.*$/i,
+        /^\(.*\)$/,                                          // (笑)のみ等
+    ];
+
+    for (const pattern of hallucinationPatterns) {
+        if (pattern.test(cleaned.trim())) {
+            return '';
+        }
+    }
 
     return cleaned.trim();
-}
-
-/**
- * 動的に繰り返しパターンを検出・除去
- */
-function removeDynamicRepetitions(text) {
-    if (!text || text.length < 10) return text;
-
-    // 3文字以上のフレーズが3回以上連続する場合を検出
-    const repetitionPattern = /(.{3,30})\1{2,}/g;
-    let cleaned = text.replace(repetitionPattern, '$1');
-
-    return cleaned;
 }
 
 /**

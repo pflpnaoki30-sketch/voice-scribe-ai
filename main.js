@@ -144,7 +144,17 @@ function handleTranscriptionResult(text) {
     state.isProcessing = false;
 
     if (text && text.trim()) {
-        const processedText = processKeywords(text.trim());
+        // 強力なサニタイズ処理
+        let sanitized = sanitizeText(text.trim());
+
+        // サニタイズ後にテキストが残っているか確認
+        if (!sanitized || sanitized.length <= 2) {
+            showToast('有効な音声を認識できませんでした', 'warning');
+            updateStatus('ready', 'タップして録音開始');
+            return;
+        }
+
+        const processedText = processKeywords(sanitized);
         const newTranscription = createTranscription(processedText);
         state.transcriptions.unshift(newTranscription);
         saveTranscriptions();
@@ -156,6 +166,77 @@ function handleTranscriptionResult(text) {
     }
 
     updateStatus('ready', 'タップして録音開始');
+}
+
+/**
+ * テキストサニタイズ - ハルシネーション除去
+ * 数字の羅列、繰り返しフレーズ、定型句を除去
+ */
+function sanitizeText(text) {
+    if (!text) return '';
+
+    let cleaned = text;
+
+    // === 1. 数字/記号の羅列削除 ===
+    cleaned = cleaned.replace(/[\d]{4,}/g, '');              // 連続する数字4桁以上
+    cleaned = cleaned.replace(/[\d\.]{5,}/g, '');            // 8.8.8.8... パターン
+    cleaned = cleaned.replace(/[\.]{3,}/g, '');              // ......
+    cleaned = cleaned.replace(/[。]{2,}/g, '。');            // 。。。→。
+    cleaned = cleaned.replace(/[、]{2,}/g, '、');            // 、、、→、
+    cleaned = cleaned.replace(/[…]{2,}/g, '…');              // ………→…
+    cleaned = cleaned.replace(/[\s]{3,}/g, ' ');             // 連続空白
+
+    // === 2. 繰り返し削除（動的検出）===
+    // 2文字以上のパターンが3回以上連続する場合
+    cleaned = cleaned.replace(/(.{2,20})\1{2,}/g, '$1');
+
+    // 単語レベルの繰り返し
+    cleaned = cleaned.replace(/(\S+)\s+\1(\s+\1)+/g, '$1');
+
+    // === 3. ブラックリスト（単独出現時のみ削除）===
+    const blacklistPatterns = [
+        /^[\s]*ありがとうございま(す|した)[。\.]*[\s]*$/i,
+        /^[\s]*(ご)?視聴ありがとうございました[。\.]*[\s]*$/i,
+        /^[\s]*チャンネル登録[^。]*[。\.]*[\s]*$/i,
+        /^[\s]*高評価[^。]*[。\.]*[\s]*$/i,
+        /^[\s]*いいね[^。]*[。\.]*[\s]*$/i,
+        /^[\s]*お疲れ様でした[。\.]*[\s]*$/i,
+        /^[\s]*それでは[。\.]*[\s]*$/i,
+        /^[\s]*では[、。\.]*[\s]*$/i,
+        /^[\s]*はい[、。\.]*[\s]*$/i,
+        /^[\s]*えー[っと]*[、。\.]*[\s]*$/i,
+        /^[\s]*あの[ー]*[、。\.]*[\s]*$/i,
+        /^[\s]*\([笑泣汗]*\)[\s]*$/i,                         // (笑)(泣)のみ
+        /^[\s]*[笑泣汗]+[\s]*$/i,                             // 笑 のみ
+        /^[\s]*[\(\)（）\[\]【】]+[\s]*$/i,                    // 括弧のみ
+        /^[\s]*[。、\.\.\.…]+[\s]*$/i,                        // 句読点のみ
+    ];
+
+    for (const pattern of blacklistPatterns) {
+        if (pattern.test(cleaned)) {
+            return '';
+        }
+    }
+
+    // === 4. 文中のハルシネーションフレーズを削除 ===
+    const inlinePatterns = [
+        /ご視聴ありがとうございました[。\.]*$/g,
+        /チャンネル登録[お願いよろしく]+[します]*[。\.]*$/g,
+        /高評価[お願いよろしく]+[します]*[。\.]*$/g,
+    ];
+
+    for (const pattern of inlinePatterns) {
+        cleaned = cleaned.replace(pattern, '');
+    }
+
+    // === 5. 最終クリーンアップ ===
+    cleaned = cleaned.trim();
+
+    // 先頭・末尾の不要な句読点を削除
+    cleaned = cleaned.replace(/^[、。\.\s]+/, '');
+    cleaned = cleaned.replace(/[、\s]+$/, '');
+
+    return cleaned;
 }
 
 function updateStatus(status, message) {
