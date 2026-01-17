@@ -36,6 +36,9 @@ const elements = {
     toast: document.getElementById('toast'),
     toastIcon: document.getElementById('toastIcon'),
     toastMessage: document.getElementById('toastMessage'),
+    // Volume Meter
+    volumeMeterContainer: document.getElementById('volumeMeterContainer'),
+    volumeMeter: document.getElementById('volumeMeter'),
 };
 
 let state = {
@@ -48,6 +51,10 @@ let state = {
     worker: null,
     mediaRecorder: null,
     audioChunks: [],
+    // Audio analysis
+    audioContext: null,
+    analyser: null,
+    volumeAnimationId: null,
 };
 
 const STORAGE_KEYS = {
@@ -201,6 +208,8 @@ function cleanText(text) {
         'ご視聴ありがとうございました',
         '視聴ありがとうございました',
         'ありがとうございました',
+        'お疲れ様でした',
+        'お疲れさまでした',
         'チャンネル登録',
         '高評価',
         'いいね',
@@ -383,6 +392,18 @@ async function startRecording() {
 
         state.audioChunks = [];
 
+        // ボリュームメーター用のAudioContext & Analyserセットアップ
+        state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        state.analyser = state.audioContext.createAnalyser();
+        state.analyser.fftSize = 256;
+
+        const source = state.audioContext.createMediaStreamSource(stream);
+        source.connect(state.analyser);
+
+        // ボリュームメーター表示開始
+        elements.volumeMeterContainer.classList.remove('hidden');
+        startVolumeMonitoring();
+
         const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
             ? 'audio/webm;codecs=opus'
             : 'audio/webm';
@@ -397,6 +418,7 @@ async function startRecording() {
 
         state.mediaRecorder.onstop = async () => {
             stream.getTracks().forEach(track => track.stop());
+            stopVolumeMonitoring();
             await processAudioData();
         };
 
@@ -429,7 +451,77 @@ function stopRecording() {
         elements.recordIcon.classList.remove('ph-stop');
         elements.recordIcon.classList.add('ph-microphone');
         elements.pulseRings.classList.add('hidden');
+
+        // ボリュームメーター非表示
+        stopVolumeMonitoring();
+        elements.volumeMeterContainer.classList.add('hidden');
+
         showToast('録音を停止しました', 'info');
+    }
+}
+
+/**
+ * リアルタイム音量モニタリング開始
+ */
+function startVolumeMonitoring() {
+    if (!state.analyser) return;
+
+    const dataArray = new Uint8Array(state.analyser.frequencyBinCount);
+
+    function updateMeter() {
+        if (!state.isRecording) return;
+
+        state.analyser.getByteFrequencyData(dataArray);
+
+        // RMS計算（周波数データから音量を推定）
+        let sum = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+            sum += dataArray[i];
+        }
+        const average = sum / dataArray.length;
+
+        // 0-100%に変換（感度調整）
+        const volumePercent = Math.min(100, average * 1.5);
+
+        // メーター更新
+        elements.volumeMeter.style.width = `${volumePercent}%`;
+
+        // 色の変更（音量に応じて緑→黄→赤）
+        if (volumePercent > 80) {
+            elements.volumeMeter.classList.remove('from-green-400', 'to-emerald-500', 'from-yellow-400', 'to-amber-500');
+            elements.volumeMeter.classList.add('from-red-400', 'to-rose-500');
+        } else if (volumePercent > 50) {
+            elements.volumeMeter.classList.remove('from-green-400', 'to-emerald-500', 'from-red-400', 'to-rose-500');
+            elements.volumeMeter.classList.add('from-yellow-400', 'to-amber-500');
+        } else {
+            elements.volumeMeter.classList.remove('from-yellow-400', 'to-amber-500', 'from-red-400', 'to-rose-500');
+            elements.volumeMeter.classList.add('from-green-400', 'to-emerald-500');
+        }
+
+        state.volumeAnimationId = requestAnimationFrame(updateMeter);
+    }
+
+    updateMeter();
+}
+
+/**
+ * 音量モニタリング停止
+ */
+function stopVolumeMonitoring() {
+    if (state.volumeAnimationId) {
+        cancelAnimationFrame(state.volumeAnimationId);
+        state.volumeAnimationId = null;
+    }
+
+    if (state.audioContext) {
+        state.audioContext.close().catch(() => { });
+        state.audioContext = null;
+        state.analyser = null;
+    }
+
+    // メーターをリセット
+    if (elements.volumeMeter) {
+        elements.volumeMeter.style.width = '0%';
     }
 }
 
