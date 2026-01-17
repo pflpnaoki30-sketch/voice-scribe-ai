@@ -293,14 +293,27 @@ async function processAudioData() {
         const audioBlob = new Blob(state.audioChunks, { type: 'audio/webm' });
         const arrayBuffer = await audioBlob.arrayBuffer();
 
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)({
-            sampleRate: TARGET_SAMPLE_RATE
-        });
+        // デコード用のAudioContext（デバイスのデフォルトサンプルレートで作成）
+        const decodeContext = new (window.AudioContext || window.webkitAudioContext)();
+        const originalBuffer = await decodeContext.decodeAudioData(arrayBuffer);
+        await decodeContext.close();
 
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
-        const pcmData = convertTo16kHzMono(audioBuffer);
+        // 高品質リサンプリング（OfflineAudioContext使用）
+        const pcmData = await resampleTo16kHzMono(originalBuffer);
 
-        await audioContext.close();
+        // 音声データの検証
+        if (!pcmData || pcmData.length === 0) {
+            throw new Error('音声データの変換に失敗しました');
+        }
+
+        // 無音チェック（RMSが閾値以下なら警告）
+        const rms = calculateRMS(pcmData);
+        if (rms < 0.001) {
+            showToast('音声が検出されませんでした', 'warning');
+            state.isProcessing = false;
+            updateStatus('ready', 'タップして録音開始');
+            return;
+        }
 
         const keywordPrompt = state.keywords.map(k => k.word).join(', ');
 
@@ -318,38 +331,93 @@ async function processAudioData() {
     }
 }
 
-function convertTo16kHzMono(audioBuffer) {
+/**
+ * OfflineAudioContextを使用した高品質リサンプリング
+ * どのデバイス（PC/スマホ、44.1kHz/48kHz等）からも確実に16kHzモノラルに変換
+ */
+async function resampleTo16kHzMono(audioBuffer) {
     const sourceSampleRate = audioBuffer.sampleRate;
+    const sourceLength = audioBuffer.length;
+    const sourceDuration = audioBuffer.duration;
+    const numChannels = audioBuffer.numberOfChannels;
 
-    let monoData;
-    if (audioBuffer.numberOfChannels === 1) {
-        monoData = audioBuffer.getChannelData(0);
-    } else {
-        const left = audioBuffer.getChannelData(0);
-        const right = audioBuffer.getChannelData(1);
-        monoData = new Float32Array(left.length);
-        for (let i = 0; i < left.length; i++) {
-            monoData[i] = (left[i] + right[i]) / 2;
+    // ターゲット長を計算
+    const targetLength = Math.round(sourceDuration * TARGET_SAMPLE_RATE);
+
+    // OfflineAudioContextで16kHzモノラルにリサンプリング
+    const offlineContext = new OfflineAudioContext(1, targetLength, TARGET_SAMPLE_RATE);
+
+    // ソースバッファを作成
+    const source = offlineContext.createBufferSource();
+    source.buffer = audioBuffer;
+
+    // モノラル化のためのチャンネルマージャー/ミキサー
+    if (numChannels > 1) {
+        const merger = offlineContext.createChannelMerger(1);
+        const splitter = offlineContext.createChannelSplitter(numChannels);
+        const gainNode = offlineContext.createGain();
+        gainNode.gain.value = 1 / numChannels;
+
+        source.connect(splitter);
+        for (let i = 0; i < numChannels; i++) {
+            splitter.connect(gainNode, i);
         }
+        gainNode.connect(offlineContext.destination);
+    } else {
+        source.connect(offlineContext.destination);
     }
 
-    if (sourceSampleRate === TARGET_SAMPLE_RATE) {
-        return monoData;
+    source.start(0);
+
+    // レンダリング実行
+    const renderedBuffer = await offlineContext.startRendering();
+
+    // Float32Arrayとして取得
+    const pcmData = renderedBuffer.getChannelData(0);
+
+    // 正規化（-1.0 〜 1.0 の範囲に収める）
+    return normalizeAudio(pcmData);
+}
+
+/**
+ * 音声データの正規化
+ * クリッピングを防ぎつつ、適切な音量レベルに調整
+ */
+function normalizeAudio(audioData) {
+    const maxAmplitude = Math.max(...audioData.map(Math.abs));
+
+    // 既に適切な範囲内ならそのまま返す
+    if (maxAmplitude <= 1.0 && maxAmplitude >= 0.1) {
+        return audioData;
     }
 
-    const ratio = sourceSampleRate / TARGET_SAMPLE_RATE;
-    const newLength = Math.round(monoData.length / ratio);
-    const result = new Float32Array(newLength);
-
-    for (let i = 0; i < newLength; i++) {
-        const srcIndex = i * ratio;
-        const srcIndexFloor = Math.floor(srcIndex);
-        const srcIndexCeil = Math.min(srcIndexFloor + 1, monoData.length - 1);
-        const fraction = srcIndex - srcIndexFloor;
-        result[i] = monoData[srcIndexFloor] * (1 - fraction) + monoData[srcIndexCeil] * fraction;
+    // 無音に近い場合はそのまま返す
+    if (maxAmplitude < 0.001) {
+        return audioData;
     }
 
-    return result;
+    // 正規化（最大振幅を0.95に）
+    const targetMax = 0.95;
+    const scale = targetMax / maxAmplitude;
+    const normalized = new Float32Array(audioData.length);
+
+    for (let i = 0; i < audioData.length; i++) {
+        normalized[i] = audioData[i] * scale;
+    }
+
+    return normalized;
+}
+
+/**
+ * RMS（二乗平均平方根）を計算
+ * 音声の全体的な音量レベルを測定
+ */
+function calculateRMS(audioData) {
+    let sum = 0;
+    for (let i = 0; i < audioData.length; i++) {
+        sum += audioData[i] * audioData[i];
+    }
+    return Math.sqrt(sum / audioData.length);
 }
 
 function createTranscription(text) {
