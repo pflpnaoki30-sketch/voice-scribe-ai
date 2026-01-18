@@ -3,6 +3,7 @@
  * Vercel Serverless Function
  * 
  * Groq API (whisper-large-v3) を使用した音声文字起こし
+ * キーワードプロンプト対応版
  */
 
 import Groq from 'groq-sdk';
@@ -62,7 +63,7 @@ export default async function handler(req, res) {
 
     try {
         // フォームデータ解析
-        const { files } = await parseForm(req);
+        const { fields, files } = await parseForm(req);
 
         // 音声ファイル取得
         const audioFile = files.audio?.[0] || files.audio;
@@ -76,13 +77,28 @@ export default async function handler(req, res) {
             return res.status(400).json({ error: 'Invalid file upload' });
         }
 
-        // Groq API呼び出し
-        const transcription = await groq.audio.transcriptions.create({
+        // プロンプト取得（キーワードリスト）
+        let prompt = '';
+        if (fields.prompt) {
+            // formidableはフィールドを配列で返す場合がある
+            prompt = Array.isArray(fields.prompt) ? fields.prompt[0] : fields.prompt;
+        }
+
+        // Groq API呼び出しオプション
+        const transcribeOptions = {
             file: fs.createReadStream(filePath),
             model: 'whisper-large-v3',
             language: 'ja',
             response_format: 'json',
-        });
+        };
+
+        // プロンプトがあれば追加（専門用語のヒント）
+        if (prompt && prompt.trim()) {
+            transcribeOptions.prompt = prompt.trim();
+        }
+
+        // Groq API呼び出し
+        const transcription = await groq.audio.transcriptions.create(transcribeOptions);
 
         // 一時ファイル削除
         fs.unlink(filePath, () => { });
