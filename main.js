@@ -1,11 +1,13 @@
 /**
  * VoiceScribe AI - Main Application Logic
- * 録音履歴リスト形式のモダンなAI文字起こしPWA
+ * Groq API (Whisper-large-v3) を使用したAI文字起こしPWA
  * 
- * Transformers.js (Whisper) を使用したローカル音声認識
- * すべての処理はローカルで実行、外部へのデータ送信なし
+ * モバイル対応版 - AudioContext.resume()によるスマホ対応
  */
 
+// ========================================
+// DOM Elements
+// ========================================
 const elements = {
     homeView: document.getElementById('homeView'),
     recordBtn: document.getElementById('recordBtn'),
@@ -36,11 +38,13 @@ const elements = {
     toast: document.getElementById('toast'),
     toastIcon: document.getElementById('toastIcon'),
     toastMessage: document.getElementById('toastMessage'),
-    // Volume Meter
     volumeMeterContainer: document.getElementById('volumeMeterContainer'),
     volumeMeter: document.getElementById('volumeMeter'),
 };
 
+// ========================================
+// Application State
+// ========================================
 let state = {
     currentView: 'home',
     currentTranscriptionId: null,
@@ -50,22 +54,43 @@ let state = {
     keywords: [],
     mediaRecorder: null,
     audioChunks: [],
-    // Audio analysis
     audioContext: null,
     analyser: null,
     volumeAnimationId: null,
+    mediaStream: null,
 };
 
+// ========================================
+// Constants
+// ========================================
 const STORAGE_KEYS = {
     TRANSCRIPTIONS: 'transcriptions_v1',
     KEYWORDS: 'voicescribe_keywords',
 };
-const TARGET_SAMPLE_RATE = 16000;
 const PREVIEW_LENGTH = 30;
-
-// API設定
 const API_ENDPOINT = '/api/transcribe';
 
+// 幻覚フィルター用禁止ワード
+const HALLUCINATION_WORDS = [
+    'お疲れ様でした',
+    'お疲れさまでした',
+    'ご視聴ありがとうございました',
+    '視聴ありがとうございました',
+    'ありがとうございました',
+    'チャンネル登録',
+    '高評価',
+    '字幕',
+    'サブタイトル',
+    'MBC',
+    'IYH',
+    'Translated by',
+    'Subtitles by',
+    'Amara.org',
+];
+
+// ========================================
+// Initialization
+// ========================================
 function init() {
     loadTranscriptions();
     loadKeywords();
@@ -96,225 +121,9 @@ function setupEventListeners() {
     });
 }
 
-function handleTranscriptionResult(text) {
-    state.isProcessing = false;
-
-    if (text && text.trim()) {
-        // 鉄壁のフィルタリング
-        let cleaned = cleanText(text.trim());
-
-        // クリーン後にテキストが残っているか確認
-        if (!cleaned) {
-            showToast('有効な音声を認識できませんでした', 'warning');
-            updateStatus('ready', 'タップして録音開始');
-            return;
-        }
-
-        const processedText = processKeywords(cleaned);
-        const newTranscription = createTranscription(processedText);
-        state.transcriptions.unshift(newTranscription);
-        saveTranscriptions();
-        renderHistoryList();
-        navigateToDetail(newTranscription.id);
-        showToast('認識が完了しました', 'success');
-    } else {
-        showToast('音声を認識できませんでした', 'warning');
-    }
-
-    updateStatus('ready', 'タップして録音開始');
-}
-
-/**
- * cleanText - 鉄壁のテキストフィルタリング
- * ハルシネーション、ループ、ノイズを完全除去
- */
-function cleanText(text) {
-    if (!text) return '';
-
-    let cleaned = text;
-
-    // ========================================
-    // 1. ループ検出（同じフレーズが3回以上連続→全体破棄）
-    // ========================================
-    if (hasRepetitionLoop(cleaned)) {
-        return '';
-    }
-
-    // ========================================
-    // 2. 記号/数字の羅列削除
-    // ========================================
-    cleaned = cleaned.replace(/[\d\.]{4,}/g, '');            // 8.8.8., 1234 等
-    cleaned = cleaned.replace(/[\.]{2,}/g, '');              // ....
-    cleaned = cleaned.replace(/[。]{2,}/g, '。');            // 。。→。
-    cleaned = cleaned.replace(/[、]{2,}/g, '、');            // 、、→、
-    cleaned = cleaned.replace(/[…]{2,}/g, '…');              // ……→…
-    cleaned = cleaned.replace(/[\s]{2,}/g, ' ');             // 連続空白→単一
-
-    // ========================================
-    // 3. ブラックリスト（Whisper特有の幻覚ワード）
-    // ========================================
-    const blacklistWords = [
-        'ご視聴ありがとうございました',
-        '視聴ありがとうございました',
-        'ありがとうございました',
-        'お疲れ様でした',
-        'お疲れさまでした',
-        'チャンネル登録',
-        '高評価',
-        'いいね',
-        '字幕',
-        'サブタイトル',
-        '翻訳',
-        'Translated by',
-        'Subtitles by',
-        'Transcribed by',
-        'Amara.org',
-    ];
-
-    for (const word of blacklistWords) {
-        if (cleaned.includes(word)) {
-            // ブラックリストワードを含む文を削除
-            const sentences = cleaned.split(/[。\.!\?！？]/);
-            cleaned = sentences
-                .filter(s => !s.includes(word))
-                .join('。')
-                .replace(/^。+|。+$/g, '');
-        }
-    }
-
-    // ブラックリストワードだけで構成されている場合は破棄
-    const blacklistOnlyPattern = new RegExp(
-        `^[\\s]*(?:${blacklistWords.map(escapeRegExp).join('|')})[。、\\.\\s]*$`,
-        'i'
-    );
-    if (blacklistOnlyPattern.test(cleaned)) {
-        return '';
-    }
-
-    // ========================================
-    // 4. 繰り返しフレーズの削除（軽度）
-    // ========================================
-    // 2文字以上が3回以上連続→1回に
-    cleaned = cleaned.replace(/(.{2,15})\1{2,}/g, '$1');
-    // 単語の繰り返し（スペース区切り）
-    cleaned = cleaned.replace(/(\S+)[\s、]+\1([\s、]+\1)+/g, '$1');
-
-    // ========================================
-    // 5. 短すぎるノイズ（2文字以下のひらがな/カタカナ単体）
-    // ========================================
-    const noisePatterns = [
-        /^[あ-んア-ン]{1,2}$/,               // ひらがな/カタカナ1-2文字
-        /^[えあうお][ーっ]*$/,               // えー、あー、うー 等
-        /^は[いぃ]*$/,                       // はい
-        /^う[ん]*$/,                         // うん
-        /^そう$/,                            // そう
-        /^ね[ぇ]*$/,                         // ねー
-        /^[笑泣汗]+$/,                       // 笑、泣 等
-        /^\([^)]*\)$/,                       // (笑) 等
-        /^[\s。、\.…]+$/,                    // 句読点のみ
-    ];
-
-    for (const pattern of noisePatterns) {
-        if (pattern.test(cleaned.trim())) {
-            return '';
-        }
-    }
-
-    // ========================================
-    // 6. 最終クリーンアップ
-    // ========================================
-    cleaned = cleaned.trim();
-    cleaned = cleaned.replace(/^[、。\.…\s]+/, '');          // 先頭の句読点削除
-    cleaned = cleaned.replace(/[、\s]+$/, '');               // 末尾の不要文字削除
-
-    // 3文字未満は破棄
-    if (cleaned.length < 3) {
-        return '';
-    }
-
-    return cleaned;
-}
-
-/**
- * ループ検出
- * 同じフレーズが3回以上連続していたらtrue
- */
-function hasRepetitionLoop(text) {
-    if (!text || text.length < 6) return false;
-
-    // 3文字〜20文字のフレーズが3回以上連続するパターン
-    const loopPattern = /(.{3,20})\1{2,}/;
-    if (loopPattern.test(text)) {
-        // マッチした繰り返し部分が全体の50%以上を占めるなら破棄
-        const match = text.match(loopPattern);
-        if (match && match[0].length > text.length * 0.5) {
-            return true;
-        }
-    }
-
-    // 単語レベルのループ検出（「じゃあ、じゃあ、じゃあ」等）
-    const words = text.split(/[、。\s]+/).filter(w => w.length > 0);
-    if (words.length >= 3) {
-        const wordCounts = {};
-        for (const word of words) {
-            wordCounts[word] = (wordCounts[word] || 0) + 1;
-        }
-        // 同じ単語が全体の70%以上を占める
-        for (const count of Object.values(wordCounts)) {
-            if (count >= 3 && count / words.length >= 0.7) {
-                return true;
-            }
-        }
-    }
-
-    return false;
-}
-
-function updateStatus(status, message) {
-    elements.statusText.textContent = message;
-    const dot = elements.statusDot;
-    dot.classList.remove('listening', 'processing');
-
-    switch (status) {
-        case 'recording':
-            dot.style.backgroundColor = '#ef4444';
-            dot.style.boxShadow = '0 10px 15px -3px rgba(239, 68, 68, 0.5)';
-            dot.classList.add('listening');
-            break;
-        case 'loading':
-        case 'processing':
-            dot.style.backgroundColor = '#f59e0b';
-            dot.style.boxShadow = '0 10px 15px -3px rgba(245, 158, 11, 0.5)';
-            dot.classList.add('processing');
-            break;
-        case 'ready':
-        default:
-            dot.style.backgroundColor = '#34d399';
-            dot.style.boxShadow = '0 10px 15px -3px rgba(52, 211, 153, 0.5)';
-            break;
-    }
-}
-
-function navigateToHome() {
-    state.currentView = 'home';
-    state.currentTranscriptionId = null;
-    elements.detailView.classList.add('translate-x-full');
-    document.body.style.overflow = '';
-}
-
-function navigateToDetail(id) {
-    const transcription = state.transcriptions.find(t => t.id === id);
-    if (!transcription) return;
-
-    state.currentView = 'detail';
-    state.currentTranscriptionId = id;
-    elements.detailDate.textContent = transcription.date;
-    elements.detailFullText.textContent = transcription.fullText;
-    elements.detailView.classList.remove('translate-x-full');
-    document.body.style.overflow = 'hidden';
-    history.pushState({ view: 'detail', id }, '', `#detail-${id}`);
-}
-
+// ========================================
+// Recording Functions
+// ========================================
 async function toggleRecording() {
     if (state.isProcessing) {
         showToast('処理中です...', 'warning');
@@ -330,6 +139,7 @@ async function toggleRecording() {
 
 async function startRecording() {
     try {
+        // マイクアクセス取得
         const stream = await navigator.mediaDevices.getUserMedia({
             audio: {
                 channelCount: 1,
@@ -339,20 +149,25 @@ async function startRecording() {
             }
         });
 
+        state.mediaStream = stream;
         state.audioChunks = [];
 
-        // ボリュームメーター用のAudioContext & Analyserセットアップ
+        // ========================================
+        // モバイル対応：AudioContext初期化と強制起動
+        // ========================================
         state.audioContext = new (window.AudioContext || window.webkitAudioContext)();
 
-        // モバイル対応: AudioContextを強制的に起動
+        // 重要：スマホでAudioContextがsuspendedの場合は強制resume
         if (state.audioContext.state === 'suspended') {
             await state.audioContext.resume();
         }
 
+        // Analyserノード設定
         state.analyser = state.audioContext.createAnalyser();
         state.analyser.fftSize = 256;
-        state.analyser.smoothingTimeConstant = 0.3; // 応答性向上
+        state.analyser.smoothingTimeConstant = 0.3;
 
+        // マイク入力をAnalyserに接続
         const source = state.audioContext.createMediaStreamSource(stream);
         source.connect(state.analyser);
 
@@ -360,6 +175,7 @@ async function startRecording() {
         elements.volumeMeterContainer.classList.remove('hidden');
         startVolumeMonitoring();
 
+        // MediaRecorder設定
         const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
             ? 'audio/webm;codecs=opus'
             : 'audio/webm';
@@ -373,7 +189,6 @@ async function startRecording() {
         };
 
         state.mediaRecorder.onstop = async () => {
-            stream.getTracks().forEach(track => track.stop());
             stopVolumeMonitoring();
             await processAudioData();
         };
@@ -381,6 +196,7 @@ async function startRecording() {
         state.mediaRecorder.start(1000);
         state.isRecording = true;
 
+        // UI更新
         elements.recordBtn.classList.add('recording');
         elements.recordIcon.classList.remove('ph-microphone');
         elements.recordIcon.classList.add('ph-stop');
@@ -403,55 +219,56 @@ function stopRecording() {
         state.mediaRecorder.stop();
         state.isRecording = false;
 
+        // メディアストリーム停止
+        if (state.mediaStream) {
+            state.mediaStream.getTracks().forEach(track => track.stop());
+            state.mediaStream = null;
+        }
+
+        // UI更新
         elements.recordBtn.classList.remove('recording');
         elements.recordIcon.classList.remove('ph-stop');
         elements.recordIcon.classList.add('ph-microphone');
         elements.pulseRings.classList.add('hidden');
-
-        // ボリュームメーター非表示
-        stopVolumeMonitoring();
         elements.volumeMeterContainer.classList.add('hidden');
 
         showToast('録音を停止しました', 'info');
     }
 }
 
-/**
- * リアルタイム音量モニタリング開始
- * モバイル対応版：TimeDomainDataを使用してより正確に音量検出
- */
+// ========================================
+// Volume Meter (モバイル対応版)
+// ========================================
 function startVolumeMonitoring() {
     if (!state.analyser) return;
 
-    // TimeDomainDataを使用（より正確なRMS計算）
     const bufferLength = state.analyser.fftSize;
     const dataArray = new Uint8Array(bufferLength);
 
     function updateMeter() {
-        // 録音中でなければ停止
         if (!state.isRecording || !state.analyser) {
             return;
         }
 
-        // TimeDomainDataを取得（波形データ）
+        // TimeDomainDataで正確な音量検出
         state.analyser.getByteTimeDomainData(dataArray);
 
-        // RMS計算（正確な音量レベル）
+        // RMS計算
         let sumSquares = 0;
         for (let i = 0; i < bufferLength; i++) {
-            const normalized = (dataArray[i] - 128) / 128; // -1 to 1
+            const normalized = (dataArray[i] - 128) / 128;
             sumSquares += normalized * normalized;
         }
         const rms = Math.sqrt(sumSquares / bufferLength);
 
-        // 感度4倍に増幅してパーセントに変換
+        // 感度4倍でパーセント変換（スマホ対応）
         const volumePercent = Math.min(100, rms * 400);
 
         // メーター更新
         if (elements.volumeMeter) {
             elements.volumeMeter.style.width = `${volumePercent}%`;
 
-            // 色の変更（音量に応じて緑→黄→赤）
+            // 色変更
             if (volumePercent > 70) {
                 elements.volumeMeter.className = 'h-full rounded-full transition-all duration-75 bg-gradient-to-r from-red-400 to-rose-500';
             } else if (volumePercent > 40) {
@@ -461,17 +278,12 @@ function startVolumeMonitoring() {
             }
         }
 
-        // 次のフレームをリクエスト
         state.volumeAnimationId = requestAnimationFrame(updateMeter);
     }
 
-    // アニメーション開始
     state.volumeAnimationId = requestAnimationFrame(updateMeter);
 }
 
-/**
- * 音量モニタリング停止
- */
 function stopVolumeMonitoring() {
     if (state.volumeAnimationId) {
         cancelAnimationFrame(state.volumeAnimationId);
@@ -484,15 +296,14 @@ function stopVolumeMonitoring() {
         state.analyser = null;
     }
 
-    // メーターをリセット
     if (elements.volumeMeter) {
         elements.volumeMeter.style.width = '0%';
     }
 }
 
-/**
- * 録音データを処理してGroq APIで文字起こし
- */
+// ========================================
+// Audio Processing & API Call
+// ========================================
 async function processAudioData() {
     if (state.audioChunks.length === 0) {
         showToast('音声データがありません', 'warning');
@@ -540,6 +351,143 @@ async function processAudioData() {
     }
 }
 
+// ========================================
+// Transcription Result Handler
+// ========================================
+function handleTranscriptionResult(text) {
+    state.isProcessing = false;
+
+    if (text && text.trim()) {
+        // 幻覚フィルター適用
+        const cleaned = filterHallucinations(text.trim());
+
+        if (!cleaned) {
+            showToast('音声が聞き取れませんでした', 'warning');
+            updateStatus('ready', 'タップして録音開始');
+            return;
+        }
+
+        // キーワード処理
+        const processedText = processKeywords(cleaned);
+
+        // 保存
+        const newTranscription = createTranscription(processedText);
+        state.transcriptions.unshift(newTranscription);
+        saveTranscriptions();
+        renderHistoryList();
+        navigateToDetail(newTranscription.id);
+        showToast('認識が完了しました', 'success');
+    } else {
+        showToast('音声を認識できませんでした', 'warning');
+    }
+
+    updateStatus('ready', 'タップして録音開始');
+}
+
+// ========================================
+// Hallucination Filter
+// ========================================
+function filterHallucinations(text) {
+    if (!text) return '';
+
+    let cleaned = text;
+
+    // 繰り返しパターン検出（同じフレーズが3回以上）
+    const loopPattern = /(.{3,20})\1{2,}/g;
+    if (loopPattern.test(cleaned)) {
+        const match = cleaned.match(loopPattern);
+        if (match && match[0].length > cleaned.length * 0.5) {
+            return '';
+        }
+        cleaned = cleaned.replace(loopPattern, '$1');
+    }
+
+    // 禁止ワードチェック（単独出現時は破棄）
+    for (const word of HALLUCINATION_WORDS) {
+        if (cleaned.trim() === word || cleaned.trim() === word + '。') {
+            return '';
+        }
+    }
+
+    // 禁止ワードを含む文を削除
+    for (const word of HALLUCINATION_WORDS) {
+        if (cleaned.includes(word)) {
+            const sentences = cleaned.split(/[。\.！？!?]/);
+            cleaned = sentences
+                .filter(s => !s.includes(word))
+                .join('。')
+                .replace(/^。+|。+$/g, '');
+        }
+    }
+
+    // 数字/記号の羅列削除
+    cleaned = cleaned.replace(/[\d\.]{4,}/g, '');
+    cleaned = cleaned.replace(/[\.]{2,}/g, '');
+    cleaned = cleaned.replace(/[。]{2,}/g, '。');
+    cleaned = cleaned.replace(/[\s]{2,}/g, ' ');
+
+    // 短すぎるノイズ（2文字以下）
+    if (cleaned.trim().length <= 2) {
+        return '';
+    }
+
+    return cleaned.trim();
+}
+
+// ========================================
+// Status & UI Updates
+// ========================================
+function updateStatus(status, message) {
+    elements.statusText.textContent = message;
+    const dot = elements.statusDot;
+    dot.classList.remove('listening', 'processing');
+
+    switch (status) {
+        case 'recording':
+            dot.style.backgroundColor = '#ef4444';
+            dot.style.boxShadow = '0 10px 15px -3px rgba(239, 68, 68, 0.5)';
+            dot.classList.add('listening');
+            break;
+        case 'loading':
+        case 'processing':
+            dot.style.backgroundColor = '#f59e0b';
+            dot.style.boxShadow = '0 10px 15px -3px rgba(245, 158, 11, 0.5)';
+            dot.classList.add('processing');
+            break;
+        case 'ready':
+        default:
+            dot.style.backgroundColor = '#34d399';
+            dot.style.boxShadow = '0 10px 15px -3px rgba(52, 211, 153, 0.5)';
+            break;
+    }
+}
+
+// ========================================
+// Navigation
+// ========================================
+function navigateToHome() {
+    state.currentView = 'home';
+    state.currentTranscriptionId = null;
+    elements.detailView.classList.add('translate-x-full');
+    document.body.style.overflow = '';
+}
+
+function navigateToDetail(id) {
+    const transcription = state.transcriptions.find(t => t.id === id);
+    if (!transcription) return;
+
+    state.currentView = 'detail';
+    state.currentTranscriptionId = id;
+    elements.detailDate.textContent = transcription.date;
+    elements.detailFullText.textContent = transcription.fullText;
+    elements.detailView.classList.remove('translate-x-full');
+    document.body.style.overflow = 'hidden';
+    history.pushState({ view: 'detail', id }, '', `#detail-${id}`);
+}
+
+// ========================================
+// Transcription CRUD
+// ========================================
 function createTranscription(text) {
     const now = new Date();
     const id = `ts_${now.getTime()}`;
@@ -566,61 +514,60 @@ function saveTranscriptions() {
         localStorage.setItem(STORAGE_KEYS.TRANSCRIPTIONS, JSON.stringify(state.transcriptions));
     } catch (e) {
         console.error('Failed to save transcriptions:', e);
-        showToast('保存に失敗しました', 'error');
     }
-}
-
-function deleteTranscription(id) {
-    const index = state.transcriptions.findIndex(t => t.id === id);
-    if (index === -1) return;
-
-    state.transcriptions.splice(index, 1);
-    saveTranscriptions();
-    renderHistoryList();
-    showToast('削除しました', 'info');
 }
 
 function deleteCurrentTranscription() {
     if (!state.currentTranscriptionId) return;
-    deleteTranscription(state.currentTranscriptionId);
+
+    state.transcriptions = state.transcriptions.filter(t => t.id !== state.currentTranscriptionId);
+    saveTranscriptions();
+    renderHistoryList();
     navigateToHome();
+    showToast('削除しました', 'success');
 }
 
+// ========================================
+// History List Rendering
+// ========================================
 function renderHistoryList() {
     const count = state.transcriptions.length;
-    elements.historyCount.textContent = `${count}件`;
+    elements.historyCount.textContent = count;
 
     if (count === 0) {
-        elements.historyList.innerHTML = '';
         elements.emptyHistory.classList.remove('hidden');
+        elements.historyList.innerHTML = '';
         return;
     }
 
     elements.emptyHistory.classList.add('hidden');
 
-    elements.historyList.innerHTML = state.transcriptions.map((t, index) => `
-        <div class="history-card fade-in" style="animation-delay: ${index * 30}ms" data-id="${t.id}">
-            <div class="flex-1 min-w-0 cursor-pointer" onclick="navigateToDetail('${t.id}')">
-                <p class="text-xs text-slate-400 mb-1">${escapeHtml(t.date)}</p>
-                <p class="text-sm text-slate-700 truncate">${escapeHtml(t.preview)}</p>
+    elements.historyList.innerHTML = state.transcriptions.map(t => `
+        <div class="history-card p-4 rounded-2xl cursor-pointer" onclick="navigateToDetail('${t.id}')">
+            <div class="flex items-start justify-between gap-3">
+                <div class="flex-1 min-w-0">
+                    <p class="text-sm text-slate-800 font-medium truncate">${escapeHtml(t.preview)}</p>
+                    <p class="text-xs text-slate-400 mt-1">${t.date}</p>
+                </div>
+                <i class="ph ph-caret-right text-slate-400 text-lg flex-shrink-0"></i>
             </div>
-            <button 
-                class="p-2 rounded-lg hover:bg-red-50 active:scale-95 transition-all duration-200 group flex-shrink-0"
-                onclick="event.stopPropagation(); deleteTranscription('${t.id}')"
-            >
-                <i class="ph ph-trash text-lg text-slate-300 group-hover:text-red-500"></i>
-            </button>
         </div>
     `).join('');
 }
 
-function copyCurrentTranscription() {
+// ========================================
+// Detail Actions
+// ========================================
+async function copyCurrentTranscription() {
     const transcription = state.transcriptions.find(t => t.id === state.currentTranscriptionId);
     if (!transcription) return;
 
-    navigator.clipboard.writeText(transcription.fullText)
-        .then(() => showToast('コピーしました', 'success'))
-        .catch(() => showToast('コピーに失敗しました', 'error'));
+    try {
+        await navigator.clipboard.writeText(transcription.fullText);
+        showToast('コピーしました', 'success');
+    } catch (e) {
+        showToast('コピーに失敗しました', 'error');
+    }
 }
 
 function saveCurrentTranscription() {
@@ -630,28 +577,16 @@ function saveCurrentTranscription() {
     const blob = new Blob([transcription.fullText], { type: 'text/plain;charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-
-    const filename = `transcript_${transcription.date.replace(/[\/: ]/g, '_')}.txt`;
-
     a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
+    a.download = `transcription_${transcription.id}.txt`;
     a.click();
-    document.body.removeChild(a);
     URL.revokeObjectURL(url);
-
-    showToast(`${filename} を保存しました`, 'success');
+    showToast('保存しました', 'success');
 }
 
-function processKeywords(text) {
-    let processed = text;
-    state.keywords.forEach(keyword => {
-        const regex = new RegExp(escapeRegExp(keyword.word), 'gi');
-        processed = processed.replace(regex, keyword.word);
-    });
-    return processed;
-}
-
+// ========================================
+// Keywords
+// ========================================
 function loadKeywords() {
     try {
         const stored = localStorage.getItem(STORAGE_KEYS.KEYWORDS);
@@ -665,33 +600,25 @@ function saveKeywords() {
     localStorage.setItem(STORAGE_KEYS.KEYWORDS, JSON.stringify(state.keywords));
 }
 
-function updateKeywordBadge() {
-    elements.keywordBadge.textContent = state.keywords.length;
-    elements.keywordBadge.classList.toggle('hidden', state.keywords.length === 0);
-}
-
 function addKeyword() {
-    const input = elements.keywordInput.value.trim();
-    if (!input) {
-        showToast('キーワードを入力してください', 'warning');
-        return;
-    }
+    const input = elements.keywordInput;
+    const word = input.value.trim();
+    if (!word) return;
 
-    if (state.keywords.some(k => k.word.toLowerCase() === input.toLowerCase())) {
+    if (state.keywords.some(k => k.word === word)) {
         showToast('既に登録されています', 'warning');
         return;
     }
 
-    state.keywords.push({ id: Date.now(), word: input });
+    state.keywords.push({ word, id: Date.now() });
     saveKeywords();
     renderKeywordList();
     updateKeywordBadge();
-
-    elements.keywordInput.value = '';
-    showToast(`「${input}」を追加しました`, 'success');
+    input.value = '';
+    showToast('キーワードを追加しました', 'success');
 }
 
-function deleteKeyword(id) {
+function removeKeyword(id) {
     state.keywords = state.keywords.filter(k => k.id !== id);
     saveKeywords();
     renderKeywordList();
@@ -700,59 +627,84 @@ function deleteKeyword(id) {
 
 function renderKeywordList() {
     if (state.keywords.length === 0) {
-        elements.keywordList.innerHTML = '';
         elements.emptyKeywords.classList.remove('hidden');
+        elements.keywordList.innerHTML = '';
         return;
     }
 
     elements.emptyKeywords.classList.add('hidden');
 
-    elements.keywordList.innerHTML = state.keywords.map((k, i) => `
-        <div class="keyword-card fade-in" style="animation-delay: ${i * 50}ms">
-            <span class="keyword-text">${escapeHtml(k.word)}</span>
-            <button class="keyword-delete-btn" onclick="deleteKeyword(${k.id})">
-                <i class="ph ph-trash text-lg"></i>
+    elements.keywordList.innerHTML = state.keywords.map(k => `
+        <div class="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+            <span class="text-sm text-slate-700">${escapeHtml(k.word)}</span>
+            <button onclick="removeKeyword(${k.id})" class="p-1 hover:bg-slate-200 rounded-lg transition-colors">
+                <i class="ph ph-x text-slate-400"></i>
             </button>
         </div>
     `).join('');
 }
 
+function updateKeywordBadge() {
+    const count = state.keywords.length;
+    if (count > 0) {
+        elements.keywordBadge.textContent = count;
+        elements.keywordBadge.classList.remove('hidden');
+    } else {
+        elements.keywordBadge.classList.add('hidden');
+    }
+}
+
+function processKeywords(text) {
+    let processed = text;
+    state.keywords.forEach(k => {
+        const regex = new RegExp(escapeRegExp(k.word), 'gi');
+        processed = processed.replace(regex, k.word);
+    });
+    return processed;
+}
+
+// ========================================
+// Bottom Sheet
+// ========================================
 function openBottomSheet() {
     renderKeywordList();
-    elements.bottomSheet.classList.add('open');
-    elements.bottomSheetOverlay.classList.add('open');
+    elements.bottomSheet.classList.remove('translate-y-full');
+    elements.bottomSheetOverlay.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
 }
 
 function closeBottomSheet() {
-    elements.bottomSheet.classList.remove('open');
-    elements.bottomSheetOverlay.classList.remove('open');
-    if (state.currentView === 'home') {
-        document.body.style.overflow = '';
-    }
+    elements.bottomSheet.classList.add('translate-y-full');
+    elements.bottomSheetOverlay.classList.add('hidden');
+    document.body.style.overflow = '';
 }
 
+// ========================================
+// Toast Notifications
+// ========================================
 function showToast(message, type = 'info') {
+    elements.toastMessage.textContent = message;
+
     const iconMap = {
         success: 'ph-check-circle',
         error: 'ph-x-circle',
-        warning: 'ph-warning-circle',
+        warning: 'ph-warning',
         info: 'ph-info',
     };
-    const colorMap = {
-        success: 'text-emerald-400',
-        error: 'text-red-400',
-        warning: 'text-amber-400',
-        info: 'text-blue-400',
-    };
 
-    elements.toastIcon.className = `ph ${iconMap[type]} text-lg ${colorMap[type]}`;
-    elements.toastMessage.textContent = message;
-    elements.toast.classList.add('show');
+    elements.toastIcon.className = `ph ${iconMap[type] || iconMap.info} text-xl`;
+    elements.toast.classList.remove('translate-y-full', 'opacity-0');
+    elements.toast.classList.add('translate-y-0', 'opacity-100');
 
-    setTimeout(() => elements.toast.classList.remove('show'), 2500);
+    setTimeout(() => {
+        elements.toast.classList.remove('translate-y-0', 'opacity-100');
+        elements.toast.classList.add('translate-y-full', 'opacity-0');
+    }, 3000);
 }
 
+// ========================================
+// Utility Functions
+// ========================================
 function formatDate(date) {
     const y = date.getFullYear();
     const m = String(date.getMonth() + 1).padStart(2, '0');
@@ -768,18 +720,11 @@ function escapeHtml(text) {
     return div.innerHTML;
 }
 
-function escapeRegExp(str) {
-    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+function escapeRegExp(string) {
+    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-        navigator.serviceWorker.register('sw.js').catch(() => { });
-    });
-}
-
+// ========================================
+// Initialize App
+// ========================================
 document.addEventListener('DOMContentLoaded', init);
-
-window.navigateToDetail = navigateToDetail;
-window.deleteTranscription = deleteTranscription;
-window.deleteKeyword = deleteKeyword;
