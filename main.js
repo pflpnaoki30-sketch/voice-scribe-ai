@@ -2,7 +2,7 @@
  * VoiceScribe AI - Main Application Logic
  * Groq API (Whisper-large-v3) を使用したAI文字起こしPWA
  * 
- * モバイル対応版 - AudioContext.resume()によるスマホ対応
+ * モバイル対応版 + キーワードプロンプト対応
  */
 
 // ========================================
@@ -318,9 +318,17 @@ async function processAudioData() {
         // 録音データをBlobに変換
         const audioBlob = new Blob(state.audioChunks, { type: 'audio/webm' });
 
-        // FormDataを作成してAPIに送信
+        // FormDataを作成
         const formData = new FormData();
         formData.append('audio', audioBlob, 'recording.webm');
+
+        // ========================================
+        // キーワードプロンプトを追加
+        // ========================================
+        const keywordPrompt = getKeywordPrompt();
+        if (keywordPrompt) {
+            formData.append('prompt', keywordPrompt);
+        }
 
         // Groq API呼び出し
         const response = await fetch(API_ENDPOINT, {
@@ -351,6 +359,17 @@ async function processAudioData() {
     }
 }
 
+/**
+ * 登録済みキーワードをカンマ区切りのプロンプト文字列に変換
+ */
+function getKeywordPrompt() {
+    // state.keywordsから取得（最も確実）
+    if (state.keywords && state.keywords.length > 0) {
+        return state.keywords.map(k => k.word).join(', ');
+    }
+    return '';
+}
+
 // ========================================
 // Transcription Result Handler
 // ========================================
@@ -367,7 +386,7 @@ function handleTranscriptionResult(text) {
             return;
         }
 
-        // キーワード処理
+        // キーワード処理（大文字小文字統一）
         const processedText = processKeywords(cleaned);
 
         // 保存
@@ -654,6 +673,9 @@ function updateKeywordBadge() {
     }
 }
 
+/**
+ * キーワード処理（認識結果に対して大文字小文字を統一）
+ */
 function processKeywords(text) {
     let processed = text;
     state.keywords.forEach(k => {
