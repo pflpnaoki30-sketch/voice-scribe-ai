@@ -48,7 +48,6 @@ let state = {
     isProcessing: false,
     transcriptions: [],
     keywords: [],
-    worker: null,
     mediaRecorder: null,
     audioChunks: [],
     // Audio analysis
@@ -64,13 +63,16 @@ const STORAGE_KEYS = {
 const TARGET_SAMPLE_RATE = 16000;
 const PREVIEW_LENGTH = 30;
 
+// API設定
+const API_ENDPOINT = '/api/transcribe';
+
 function init() {
     loadTranscriptions();
     loadKeywords();
     setupEventListeners();
-    initializeWorker();
     renderHistoryList();
     updateKeywordBadge();
+    updateStatus('ready', 'タップして録音開始');
 }
 
 function setupEventListeners() {
@@ -92,59 +94,6 @@ function setupEventListeners() {
             navigateToHome();
         }
     });
-}
-
-function initializeWorker() {
-    try {
-        state.worker = new Worker('worker.js', { type: 'module' });
-        state.worker.onmessage = handleWorkerMessage;
-        state.worker.onerror = (error) => {
-            console.error('Worker error:', error);
-            showToast('AIエンジンでエラーが発生しました', 'error');
-            updateStatus('ready', 'タップして録音開始');
-        };
-    } catch (error) {
-        console.error('Failed to initialize worker:', error);
-        showToast('AIエンジンの初期化に失敗しました', 'error');
-    }
-}
-
-function handleWorkerMessage(event) {
-    const { type, status, message, percent, text } = event.data;
-
-    switch (type) {
-        case 'status':
-            handleStatusUpdate(status, message);
-            break;
-        case 'progress':
-            updateStatus('loading', message || `読込中: ${percent}%`);
-            break;
-        case 'result':
-            handleTranscriptionResult(text);
-            break;
-        case 'error':
-            state.isProcessing = false;
-            showToast(message || 'エラーが発生しました', 'error');
-            updateStatus('ready', 'タップして録音開始');
-            break;
-    }
-}
-
-function handleStatusUpdate(status, message) {
-    switch (status) {
-        case 'loading':
-            updateStatus('loading', message || 'モデル読込中...');
-            break;
-        case 'ready':
-            if (!state.isRecording && !state.isProcessing) {
-                updateStatus('ready', 'タップして録音開始');
-            }
-            break;
-        case 'transcribing':
-            state.isProcessing = true;
-            updateStatus('processing', message || '認識中...');
-            break;
-    }
 }
 
 function handleTranscriptionResult(text) {
@@ -541,6 +490,9 @@ function stopVolumeMonitoring() {
     }
 }
 
+/**
+ * 録音データを処理してGroq APIで文字起こし
+ */
 async function processAudioData() {
     if (state.audioChunks.length === 0) {
         showToast('音声データがありません', 'warning');
@@ -549,185 +501,43 @@ async function processAudioData() {
     }
 
     state.isProcessing = true;
-    updateStatus('processing', '音声データを処理中...');
+    updateStatus('processing', 'AIで文字起こし中...');
 
     try {
+        // 録音データをBlobに変換
         const audioBlob = new Blob(state.audioChunks, { type: 'audio/webm' });
-        const arrayBuffer = await audioBlob.arrayBuffer();
 
-        // Step 1: デコード用AudioContext（デバイスのデフォルトレートで作成）
-        const decodeContext = new (window.AudioContext || window.webkitAudioContext)();
-        const originalBuffer = await decodeContext.decodeAudioData(arrayBuffer);
-        const originalSampleRate = originalBuffer.sampleRate;
-        await decodeContext.close();
+        // FormDataを作成してAPIに送信
+        const formData = new FormData();
+        formData.append('audio', audioBlob, 'recording.webm');
 
-        // Step 2: 16kHzモノラルへリサンプリング
-        let pcmData;
-        try {
-            // 方法1: OfflineAudioContextを使用（高品質）
-            pcmData = await resampleWithOfflineContext(originalBuffer);
-        } catch (offlineError) {
-            console.warn('OfflineAudioContext failed, using fallback:', offlineError);
-            // 方法2: 手動リサンプリング（フォールバック）
-            pcmData = resampleManually(originalBuffer, TARGET_SAMPLE_RATE);
-        }
-
-        // Step 3: 音声データの検証
-        if (!pcmData || pcmData.length === 0) {
-            throw new Error('音声データの変換に失敗しました');
-        }
-
-        // Step 4: 無音チェック
-        const rms = calculateRMS(pcmData);
-        if (rms < 0.001) {
-            showToast('音声が検出されませんでした', 'warning');
-            state.isProcessing = false;
-            updateStatus('ready', 'タップして録音開始');
-            return;
-        }
-
-        // Step 5: 正規化
-        pcmData = normalizeAudio(pcmData);
-
-        // Step 6: Workerに送信
-        const keywordPrompt = state.keywords.map(k => k.word).join(', ');
-
-        state.worker.postMessage({
-            type: 'transcribe',
-            audioData: pcmData,
-            keywords: keywordPrompt
+        // Groq API呼び出し
+        const response = await fetch(API_ENDPOINT, {
+            method: 'POST',
+            body: formData,
         });
 
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({}));
+            throw new Error(errorData.error || `API error: ${response.status}`);
+        }
+
+        const result = await response.json();
+
+        if (result.success && result.text) {
+            handleTranscriptionResult(result.text);
+        } else {
+            showToast('音声を認識できませんでした', 'warning');
+            state.isProcessing = false;
+            updateStatus('ready', 'タップして録音開始');
+        }
+
     } catch (error) {
-        console.error('Audio processing failed:', error);
-        showToast('音声データの処理に失敗しました', 'error');
+        console.error('Transcription failed:', error);
+        showToast(`文字起こしに失敗しました: ${error.message}`, 'error');
         state.isProcessing = false;
         updateStatus('ready', 'タップして録音開始');
     }
-}
-
-/**
- * OfflineAudioContextを使用した高品質リサンプリング
- * ブラウザのネイティブリサンプラーを使用
- */
-async function resampleWithOfflineContext(audioBuffer) {
-    const sourceDuration = audioBuffer.duration;
-    const numChannels = audioBuffer.numberOfChannels;
-    const targetLength = Math.round(sourceDuration * TARGET_SAMPLE_RATE);
-
-    // OfflineAudioContextで16kHzモノラルにリサンプリング
-    const offlineContext = new OfflineAudioContext(1, targetLength, TARGET_SAMPLE_RATE);
-
-    // ソースバッファを作成
-    const source = offlineContext.createBufferSource();
-    source.buffer = audioBuffer;
-
-    // ステレオ→モノラル変換
-    if (numChannels > 1) {
-        const splitter = offlineContext.createChannelSplitter(numChannels);
-        const merger = offlineContext.createChannelMerger(1);
-        const gainNode = offlineContext.createGain();
-        gainNode.gain.value = 1 / numChannels;
-
-        source.connect(splitter);
-        for (let i = 0; i < numChannels; i++) {
-            splitter.connect(gainNode, i);
-        }
-        gainNode.connect(offlineContext.destination);
-    } else {
-        source.connect(offlineContext.destination);
-    }
-
-    source.start(0);
-
-    const renderedBuffer = await offlineContext.startRendering();
-    return new Float32Array(renderedBuffer.getChannelData(0));
-}
-
-/**
- * 手動リサンプリング（フォールバック用）
- * 線形補間を使用したダウンサンプリング
- */
-function resampleManually(audioBuffer, targetSampleRate) {
-    const sourceSampleRate = audioBuffer.sampleRate;
-    const numChannels = audioBuffer.numberOfChannels;
-
-    // Step 1: モノラル化
-    let monoData;
-    if (numChannels === 1) {
-        monoData = new Float32Array(audioBuffer.getChannelData(0));
-    } else {
-        const ch0 = audioBuffer.getChannelData(0);
-        const ch1 = audioBuffer.getChannelData(1);
-        monoData = new Float32Array(ch0.length);
-        for (let i = 0; i < ch0.length; i++) {
-            monoData[i] = (ch0[i] + ch1[i]) / 2;
-        }
-    }
-
-    // Step 2: サンプルレートが同じならそのまま返す
-    if (sourceSampleRate === targetSampleRate) {
-        return monoData;
-    }
-
-    // Step 3: リサンプリング（線形補間）
-    const ratio = sourceSampleRate / targetSampleRate;
-    const newLength = Math.floor(monoData.length / ratio);
-    const result = new Float32Array(newLength);
-
-    for (let i = 0; i < newLength; i++) {
-        const srcIndex = i * ratio;
-        const srcFloor = Math.floor(srcIndex);
-        const srcCeil = Math.min(srcFloor + 1, monoData.length - 1);
-        const fraction = srcIndex - srcFloor;
-
-        // 線形補間
-        result[i] = monoData[srcFloor] * (1 - fraction) + monoData[srcCeil] * fraction;
-    }
-
-    return result;
-}
-
-/**
- * 音声データの正規化
- * 最大振幅を0.95に調整してクリッピングを防止
- */
-function normalizeAudio(audioData) {
-    let maxAmp = 0;
-    for (let i = 0; i < audioData.length; i++) {
-        const abs = Math.abs(audioData[i]);
-        if (abs > maxAmp) maxAmp = abs;
-    }
-
-    // 既に適切な範囲内
-    if (maxAmp <= 1.0 && maxAmp >= 0.1) {
-        return audioData;
-    }
-
-    // 無音に近い
-    if (maxAmp < 0.001) {
-        return audioData;
-    }
-
-    // 正規化
-    const scale = 0.95 / maxAmp;
-    const normalized = new Float32Array(audioData.length);
-    for (let i = 0; i < audioData.length; i++) {
-        normalized[i] = audioData[i] * scale;
-    }
-
-    return normalized;
-}
-
-/**
- * RMS（二乗平均平方根）を計算
- */
-function calculateRMS(audioData) {
-    let sum = 0;
-    for (let i = 0; i < audioData.length; i++) {
-        sum += audioData[i] * audioData[i];
-    }
-    return Math.sqrt(sum / audioData.length);
 }
 
 function createTranscription(text) {
